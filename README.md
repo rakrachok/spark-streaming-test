@@ -1,1 +1,12 @@
-# sprak-streaming-test
+Spark Streaming Test
+=========================
+
+To build this project use
+
+    mvn install
+
+To run this project from within Maven use
+
+    mvn exec:java
+
+

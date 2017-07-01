@@ -7,13 +7,15 @@ import org.pcap4j.core.PcapHandle;
 import org.pcap4j.core.PcapNativeException;
 import org.pcap4j.core.PcapNetworkInterface;
 import org.pcap4j.core.Pcaps;
-import org.pcap4j.packet.Packet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
-public class CaptureNetworkReceiver extends Receiver<Packet> {
+public class CaptureNetworkReceiver extends Receiver<byte[]> {
 
     private static final Logger log = LoggerFactory.getLogger(CaptureNetworkReceiver.class);
 
@@ -37,7 +39,7 @@ public class CaptureNetworkReceiver extends Receiver<Packet> {
     private static final String NIF_NAME
             = System.getProperty(NIF_NAME_KEY);
 
-    private Thread t;
+    private ConcurrentMap<String, Thread> localReceivers = new ConcurrentHashMap<>();
 
     public CaptureNetworkReceiver() {
         super(StorageLevel.MEMORY_AND_DISK_SER_2());
@@ -45,32 +47,62 @@ public class CaptureNetworkReceiver extends Receiver<Packet> {
 
     @Override
     public void onStart() {
-        t = new Thread(() -> receive());
-        t.start();
+        List<PcapNetworkInterface> nifs;
+        try {
+            nifs = Pcaps.findAllDevs();
+        } catch (PcapNativeException e) {
+            throw new RuntimeException(e);
+        }
+
+        if (nifs == null) {
+            stop("Cannot find any NIFs");
+            return;
+        }
+
+        for (PcapNetworkInterface nif : nifs) {
+            Thread t = new Thread(() -> receive(nif));
+            localReceivers.put(nif.getName(), t);
+        }
+
+        localReceivers.forEach((s, t) -> {
+            log.info("Starting a thread for " + s);
+            t.start();
+        });
     }
 
     @Override
     public void onStop() {
-        t.interrupt();
+        localReceivers.forEach((s, t) -> t.interrupt());
     }
 
-    private void receive() {
-        log.info("Starting monitoring");
+    private void receive(PcapNetworkInterface nif) {
+        log.info("Starting monitoring NIF:" + nif.getName());
+        PcapHandle loHandle;
         try {
-            PcapNetworkInterface lo0 = Pcaps.getDevByName("lo0");
-            PcapHandle loHandle = lo0.openLive(SNAPLEN, PcapNetworkInterface.PromiscuousMode.NONPROMISCUOUS, READ_TIMEOUT);
-            while (true) {
-                byte[] rawPacket = loHandle.getNextRawPacket();
-                if (rawPacket == null) {
-                    log.warn("Nothing to read.");
-                    restart("Nothing to read. The receiver is being restarted");
-                } else {
-                    store(ByteBuffer.wrap(rawPacket));
-                }
-            }
-        } catch (PcapNativeException | NotOpenException e) {
+            loHandle = nif.openLive(SNAPLEN, PcapNetworkInterface.PromiscuousMode.NONPROMISCUOUS, READ_TIMEOUT);
+        } catch (PcapNativeException e) {
             log.error("Error", e);
             stop("Receiver has been stopped by the error.", e);
+            return;
+        }
+
+        while (true) {
+            byte[] rawPacket;
+            try {
+                rawPacket = loHandle.getNextRawPacket();
+            } catch (NotOpenException e) {
+                log.error("Error", e);
+                stop("Receiver has been stopped by the error.", e);
+                return;
+            }
+
+            if (rawPacket == null) {
+                log.warn("Nothing to read.");
+                restart("Nothing to read. The receiver is being restarted");
+            } else {
+                log.info("Storing bytes: " + rawPacket);
+                store(ByteBuffer.wrap(rawPacket));
+            }
         }
     }
 }
