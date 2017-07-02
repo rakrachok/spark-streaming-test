@@ -9,13 +9,14 @@ import org.pcap4j.core.PcapNetworkInterface;
 import org.pcap4j.core.Pcaps;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import scala.Tuple2;
 
-import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
-public class CaptureNetworkReceiver extends Receiver<byte[]> {
+public class CaptureNetworkReceiver extends Receiver<Tuple2<String, byte[]>> {
 
     private static final Logger log = LoggerFactory.getLogger(CaptureNetworkReceiver.class);
 
@@ -47,6 +48,7 @@ public class CaptureNetworkReceiver extends Receiver<byte[]> {
 
     @Override
     public void onStart() {
+        log.info("---CaptureNetworkReceiver onStart---");
         List<PcapNetworkInterface> nifs;
         try {
             nifs = Pcaps.findAllDevs();
@@ -60,29 +62,36 @@ public class CaptureNetworkReceiver extends Receiver<byte[]> {
         }
 
         for (PcapNetworkInterface nif : nifs) {
-            Thread t = new Thread(() -> receive(nif));
-            localReceivers.put(nif.getName(), t);
+            localReceivers.computeIfAbsent(nif.getName(), t -> new Thread(() -> receive(nif)));
         }
 
         localReceivers.forEach((s, t) -> {
-            log.info("Starting a thread for " + s);
-            t.start();
+            if (!t.isAlive()) {
+                log.info("Starting a thread for " + s);
+                t.start();
+            } else {
+                log.info("A thread for " + s + " is alive");
+            }
         });
     }
 
     @Override
     public void onStop() {
+        log.info("---CaptureNetworkReceiver onStop---");
+        log.info("Killing threads");
         localReceivers.forEach((s, t) -> t.interrupt());
     }
 
     private void receive(PcapNetworkInterface nif) {
-        log.info("Starting monitoring NIF:" + nif.getName());
+        log.info("Starting monitoring NIF: " + nif.getName());
         PcapHandle loHandle;
         try {
             loHandle = nif.openLive(SNAPLEN, PcapNetworkInterface.PromiscuousMode.NONPROMISCUOUS, READ_TIMEOUT);
         } catch (PcapNativeException e) {
             log.error("Error", e);
-            stop("Receiver has been stopped by the error.", e);
+//            stop("Receiver has been stopped with the error.", e);
+            log.info("Stopping a thread for " + nif.getName());
+            localReceivers.get(nif.getName()).interrupt();
             return;
         }
 
@@ -92,17 +101,22 @@ public class CaptureNetworkReceiver extends Receiver<byte[]> {
                 rawPacket = loHandle.getNextRawPacket();
             } catch (NotOpenException e) {
                 log.error("Error", e);
-                stop("Receiver has been stopped by the error.", e);
+//                stop("Receiver has been stopped with the error.", e);
+                log.info("Stopping a thread for " + nif.getName());
+                localReceivers.get(nif.getName()).interrupt();
                 return;
             }
 
             if (rawPacket == null) {
                 log.warn("Nothing to read.");
-                restart("Nothing to read. The receiver is being restarted");
+//                restart("Nothing to read. The receiver is being restarted");
+//                return;
+                break;
             } else {
-                log.info("Storing bytes: " + rawPacket);
-                store(ByteBuffer.wrap(rawPacket));
+                log.info("Storing bytes: " + Arrays.toString(rawPacket));
+                store(new Tuple2<>(nif.getName(), rawPacket));
             }
         }
+        restart("Nothing to read. The receiver is being restarted");
     }
 }
